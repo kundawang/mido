@@ -27,15 +27,36 @@ from numbers import Integral
 from ..messages import SPEC_BY_STATUS, Message
 from .meta import MetaMessage, build_meta_message, encode_variable_int, meta_charset
 from .tracks import MidiTrack, fix_end_of_track, merge_tracks
-from .units import tick2second
+from .units import (
+    SMPTE_CODE_BY_FPS,
+    SMPTE_FPS_BY_CODE,
+    smpte_tick2second,
+    tick2second,
+)
 
 # The default tempo is 120 BPM.
 # (500000 microseconds per beat (quarter note).)
 DEFAULT_TEMPO = 500000
 DEFAULT_TICKS_PER_BEAT = 480
 
+# A PPQ (metric) division word is a 15-bit positive integer.
+MAX_TICKS_PER_BEAT = 0x7FFF
+
+# In an SMPTE division word the ticks-per-frame value is one unsigned byte.
+MAX_TICKS_PER_FRAME = 0xFF
+
 # Maximum message length to attempt to read.
 MAX_MESSAGE_LENGTH = 1000000
+
+
+class _Unset:
+    """Sentinel for arguments that may be set to None explicitly."""
+
+    def __repr__(self):
+        return '<unset>'
+
+
+_UNSET = _Unset()
 
 
 def print_byte(byte, pos=0):
@@ -111,6 +132,73 @@ def read_file_header(infile):
             raise EOFError
 
         return struct.unpack('>hhh', data[:6])
+
+
+def decode_division(division):
+    """Decode the 16-bit header division word.
+
+    A positive word is a PPQ (ticks per quarter note) value and is
+    returned as ``('ppq', value)``. A negative word selects SMPTE
+    timing: the upper byte is a frame rate code and the lower byte is
+    the number of ticks per frame, returned as
+    ``('smpte', fps, ticks_per_frame)``.
+    """
+    if division > 0:
+        return 'ppq', division
+
+    if division == 0:
+        raise ValueError('division word must not be zero')
+
+    frame_code = division >> 8
+    if frame_code not in SMPTE_FPS_BY_CODE:
+        raise ValueError(
+            f'invalid SMPTE frame rate code {frame_code} in division word '
+            f'{division} (valid codes: '
+            f'{", ".join(str(code) for code in SMPTE_FPS_BY_CODE)})')
+
+    ticks_per_frame = division & 0xFF
+    if ticks_per_frame == 0:
+        raise ValueError(
+            'SMPTE division word has zero ticks per frame')
+
+    return 'smpte', SMPTE_FPS_BY_CODE[frame_code], ticks_per_frame
+
+
+def encode_division(ticks_per_beat=_UNSET, fps=_UNSET,
+                    ticks_per_frame=_UNSET):
+    """Encode a header division word from PPQ or SMPTE parameters."""
+    if fps is not _UNSET:
+        if ticks_per_beat is not _UNSET:
+            raise ValueError(
+                "ticks_per_beat and fps are mutually exclusive; "
+                "SMPTE files use fps and ticks_per_frame")
+        if fps not in SMPTE_CODE_BY_FPS:
+            raise ValueError(
+                f'invalid SMPTE frame rate {fps!r} '
+                f'(must be one of '
+                f'{", ".join(str(value) for value in SMPTE_CODE_BY_FPS)})')
+        if not isinstance(ticks_per_frame, Integral):
+            raise TypeError('ticks_per_frame must be an integer')
+        if ticks_per_frame <= 0:
+            raise ValueError('ticks_per_frame must be a positive integer')
+        if ticks_per_frame > MAX_TICKS_PER_FRAME:
+            raise OverflowError(
+                f'ticks_per_frame {ticks_per_frame} does not fit in one byte')
+        return (SMPTE_CODE_BY_FPS[fps] << 8) | ticks_per_frame
+
+    if ticks_per_beat is _UNSET:
+        ticks_per_beat = DEFAULT_TICKS_PER_BEAT
+
+    if not isinstance(ticks_per_beat, Integral):
+        raise TypeError('ticks_per_beat must be an integer')
+    if ticks_per_beat <= 0:
+        raise ValueError('ticks_per_beat must be a positive integer')
+    if ticks_per_beat > MAX_TICKS_PER_BEAT:
+        raise OverflowError(
+            f'ticks_per_beat {ticks_per_beat} is larger than the maximum '
+            f'{MAX_TICKS_PER_BEAT} that fits in the division word')
+
+    return ticks_per_beat
 
 
 def read_message(infile, status_byte, peek_data, delta, clip=False):
@@ -290,19 +378,27 @@ def get_seconds_per_tick(tempo, ticks_per_beat):
 
 class MidiFile:
     def __init__(self, filename=None, file=None,
-                 type=1, ticks_per_beat=DEFAULT_TICKS_PER_BEAT,
+                 type=1, ticks_per_beat=_UNSET,
                  charset='latin1',
                  debug=False,
                  clip=False,
-                 tracks=None
+                 tracks=None,
+                 fps=_UNSET,
+                 ticks_per_frame=_UNSET,
                  ):
 
         self.filename = filename
         self.type = type
-        self.ticks_per_beat = ticks_per_beat
         self.charset = charset
         self.debug = debug
         self.clip = clip
+
+        # SMPTE files use fps and ticks_per_frame instead of
+        # ticks_per_beat, which is then set to None.
+        self.fps = None
+        self.ticks_per_frame = None
+        self.ticks_per_beat = None
+        self._configure_division(ticks_per_beat, fps, ticks_per_frame)
 
         self.tracks = []
         self._merged_track = None
@@ -318,6 +414,55 @@ class MidiFile:
         elif self.filename is not None:
             with open(filename, 'rb') as file:
                 self._load(file)
+
+    def _configure_division(self, ticks_per_beat, fps, ticks_per_frame):
+        """Validate and store the header time division."""
+        if fps is not _UNSET:
+            if ticks_per_beat is not _UNSET:
+                raise ValueError(
+                    "ticks_per_beat and fps are mutually exclusive; "
+                    "SMPTE files use fps and ticks_per_frame")
+            if ticks_per_frame is _UNSET:
+                raise ValueError(
+                    'ticks_per_frame is required when fps is given')
+            # encode_division() performs the full validation.
+            encode_division(fps=fps, ticks_per_frame=ticks_per_frame)
+            self.fps = fps
+            self.ticks_per_frame = ticks_per_frame
+        else:
+            if ticks_per_beat is _UNSET:
+                ticks_per_beat = DEFAULT_TICKS_PER_BEAT
+            if ticks_per_frame is not _UNSET:
+                raise ValueError(
+                    'ticks_per_frame can only be used together with fps')
+            # encode_division() performs the full validation.
+            encode_division(ticks_per_beat=ticks_per_beat)
+            self.ticks_per_beat = ticks_per_beat
+
+    @property
+    def is_smpte(self):
+        """True if the file uses SMPTE (frame-based) timing."""
+        return self.fps is not None
+
+    @property
+    def division(self):
+        """The raw 16-bit division word written in the file header."""
+        if self.is_smpte:
+            return encode_division(fps=self.fps,
+                                   ticks_per_frame=self.ticks_per_frame)
+        return encode_division(ticks_per_beat=self.ticks_per_beat)
+
+    def _tick2second(self, tick, tempo):
+        """Convert a delta time in ticks to seconds using this file's
+        time division.
+
+        This is the single time base used by __iter__(), length and
+        play(). In SMPTE mode the tempo is ignored because timing is
+        derived from the frame rate.
+        """
+        if self.is_smpte:
+            return smpte_tick2second(tick, self.fps, self.ticks_per_frame)
+        return tick2second(tick, self.ticks_per_beat, tempo)
 
     @property
     def merged_track(self):
@@ -357,11 +502,20 @@ class MidiFile:
 
             (self.type,
              num_tracks,
-             self.ticks_per_beat) = read_file_header(infile)
+             division) = read_file_header(infile)
+
+            kind, *values = decode_division(division)
+            if kind == 'smpte':
+                self.fps, self.ticks_per_frame = values
+                self.ticks_per_beat = None
+            else:
+                self.ticks_per_beat = values[0]
+                self.fps = None
+                self.ticks_per_frame = None
 
             if self.debug:
-                _dbg('-> type={}, tracks={}, ticks_per_beat={}'.format(
-                    self.type, num_tracks, self.ticks_per_beat))
+                _dbg('-> type={}, tracks={}, division={}'.format(
+                    self.type, num_tracks, self.division))
                 _dbg()
 
             for i in range(num_tracks):
@@ -392,13 +546,15 @@ class MidiFile:
             # Convert message time from absolute time
             # in ticks to relative time in seconds.
             if msg.time > 0:
-                delta = tick2second(msg.time, self.ticks_per_beat, tempo)
+                delta = self._tick2second(msg.time, tempo)
             else:
                 delta = 0
 
             yield msg.copy(skip_checks=True, time=delta)
 
-            if msg.type == 'set_tempo':
+            # Tempo only affects PPQ timing. In SMPTE files time is
+            # derived from the frame rate, so set_tempo is ignored.
+            if msg.type == 'set_tempo' and not self.is_smpte:
                 tempo = msg.tempo
 
     def play(self, meta_messages=False, now=time.time):
@@ -463,7 +619,7 @@ class MidiFile:
         with meta_charset(self.charset):
             header = struct.pack('>hhh', self.type,
                                  len(self.tracks),
-                                 self.ticks_per_beat)
+                                 self.division)
 
             write_chunk(outfile, b'MThd', header)
 
@@ -493,10 +649,16 @@ class MidiFile:
         else:
             tracks_str = ''
 
-        return '{}(type={}, ticks_per_beat={}{})'.format(
+        if self.is_smpte:
+            division_str = 'fps={}, ticks_per_frame={}'.format(
+                self.fps, self.ticks_per_frame)
+        else:
+            division_str = f'ticks_per_beat={self.ticks_per_beat}'
+
+        return '{}(type={}, {}{})'.format(
             self.__class__.__name__,
             self.type,
-            self.ticks_per_beat,
+            division_str,
             tracks_str,
         )
 

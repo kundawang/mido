@@ -245,3 +245,38 @@ If you have a lot of rounding errors you should increase the time resolution
 with more ticks per quarter note, by setting MidiFile.ticks_per_beat to a
 large number. Typical values range from 96 to 480 but some use even more ticks
 per quarter note.
+
+
+SMPTE (frame-based) timing
+--------------------------
+
+Besides the metrical (PPQ) timing described above the MIDI specification
+defines a second timing mode based on SMPTE time codes, used for example by
+MIDI files that synchronize picture frames to music.
+
+In this mode the header division word stores a negative frame rate code and
+the number of ticks per frame instead of ticks per quarter note. The four
+standard frame rates are 24, 25, 29.97 (NTSC drop frame) and 30 frames per
+second and are available as :py:data:`SMPTE_FPS`.
+
+Create an SMPTE file by passing ``fps`` and ``ticks_per_frame`` instead of
+``ticks_per_beat``::
+
+    mid = MidiFile(fps=25, ticks_per_frame=40)
+
+In an SMPTE file :py:attr:`MidiFile.ticks_per_beat` is ``None`` while
+:py:attr:`MidiFile.fps`, :py:attr:`MidiFile.ticks_per_frame` and
+:py:attr:`MidiFile.is_smpte` describe the time base. The duration of one tick
+is fixed::
+
+    1 tick = 1 / (fps * ticks_per_frame) seconds
+
+:py:meth:`MidiFile.length`, iterating over the file and :py:meth:`MidiFile.play`
+all use this time base. Because time is locked to the frame rate,
+``set_tempo`` meta messages are ignored in SMPTE files. The dedicated
+conversion functions are :py:func:`smpte_tick2second` and
+:py:func:`smpte_second2tick`.
+
+An invalid frame rate, a non-positive ticks-per-frame value, a negative tick
+or values that do not fit in the header division word raise ``ValueError``,
+``TypeError`` or ``OverflowError``.

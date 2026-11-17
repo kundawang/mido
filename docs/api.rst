@@ -183,6 +183,16 @@ Standard MIDI Files
 
 .. autofunction:: second2tick
 
+.. autofunction:: smpte_tick2second
+
+.. autofunction:: smpte_second2tick
+
+.. autodata:: SMPTE_FPS
+
+.. autofunction:: encode_division
+
+.. autofunction:: decode_division
+
 .. autofunction:: bpm2tempo
 
 .. autofunction:: tempo2bpm

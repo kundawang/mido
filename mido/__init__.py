@@ -108,14 +108,19 @@ from .messages import (
     parse_string_stream,
 )
 from .midifiles import (
+    SMPTE_FPS,
     KeySignatureError,
     MetaMessage,
     MidiFile,
     MidiTrack,
     UnknownMetaMessage,
     bpm2tempo,
+    decode_division,
+    encode_division,
     merge_tracks,
     second2tick,
+    smpte_second2tick,
+    smpte_tick2second,
     tempo2bpm,
     tick2second,
 )
@@ -127,6 +132,7 @@ if TYPE_CHECKING:
     from .backends.backend import get_input_names, get_ioport_names, get_output_names
 
 __all__ = [
+    "SMPTE_FPS",
     "KeySignatureError",
     "MAX_PITCHWHEEL",
     "MAX_SONGPOS",
@@ -139,6 +145,8 @@ __all__ = [
     "Parser",
     "UnknownMetaMessage",
     "bpm2tempo",
+    "decode_division",
+    "encode_division",
     "format_as_string",
     "merge_tracks",
     "parse",
@@ -148,6 +156,8 @@ __all__ = [
     "ports",
     "read_syx_file",
     "second2tick",
+    "smpte_second2tick",
+    "smpte_tick2second",
     "sockets",
     "tempo2bpm",
     "tick2second",

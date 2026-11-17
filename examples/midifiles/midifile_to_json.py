@@ -13,10 +13,15 @@ def midifile_to_dict(mid):
     for track in mid.tracks:
         tracks.append([vars(msg).copy() for msg in track])
 
-    return {
+    result = {
         'ticks_per_beat': mid.ticks_per_beat,
         'tracks': tracks,
     }
+    if mid.is_smpte:
+        # SMPTE files use frame-based timing instead of ticks per beat.
+        result['fps'] = mid.fps
+        result['ticks_per_frame'] = mid.ticks_per_frame
+    return result
 
 
 mid = mido.MidiFile(sys.argv[1])

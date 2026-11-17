@@ -16,6 +16,27 @@ This project uses `Semantic Versioning <https://semver.org>`_.
 Release History
 ---------------
 
+Unreleased
+^^^^^^^^^^
+
+* New Midifile: read and write SMPTE (frame-based) header divisions.
+  ``MidiFile`` now accepts ``fps`` (24, 25, 29.97 or 30) and
+  ``ticks_per_frame`` and exposes ``is_smpte`` and the raw ``division``
+  word. ``length``, iteration and ``play`` use the SMPTE time base and
+  ignore ``set_tempo`` events in SMPTE files
+
+* New ``smpte_tick2second()``, ``smpte_second2tick()``,
+  ``encode_division()``, ``decode_division()`` and the ``SMPTE_FPS``
+  constants
+
+* Bugfix Midifile: an SMPTE division word (high bit set) used to be
+  stored as a negative ``ticks_per_beat``, producing negative playback
+  times; it is now decoded into frame rate and ticks per frame
+
+* Invalid frame rates, zero ticks per frame, zero or out-of-range
+  division words and negative ticks now raise ``ValueError`` or
+  ``OverflowError`` with a clear message
+
 1.3.3 (2024-10-25)
 ^^^^^^^^^^^^^^^^^^
 
