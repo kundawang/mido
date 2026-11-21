@@ -189,6 +189,25 @@ Standard MIDI Files
 
 .. autofunction:: merge_tracks
 
+Conflict diagnostics
+^^^^^^^^^^^^^^^^^^^^
+
+.. module:: mido.midifiles.diagnostics
+
+.. autofunction:: detect_conflicts
+
+.. autoclass:: ConflictReport
+   :members:
+
+.. autoclass:: Conflict
+   :members:
+
+.. autoclass:: ConflictType
+   :members:
+
+.. autoclass:: Event
+   :members:
+
 .. module:: mido.midifiles
 
 .. todo: Expose more of the internal API? (meta, tracks, units…)

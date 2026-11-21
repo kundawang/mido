@@ -102,7 +102,8 @@ from .messages import (Message, parse_string, parse_string_stream,
 from .midifiles import (MidiFile, MidiTrack, merge_tracks,
                         MetaMessage, UnknownMetaMessage,
                         bpm2tempo, tempo2bpm, tick2second, second2tick,
-                        KeySignatureError)
+                        KeySignatureError, Conflict, ConflictReport,
+                        ConflictType, detect_conflicts)
 from .parser import Parser, parse, parse_all
 from .syx import read_syx_file, write_syx_file
 from .version import version_info

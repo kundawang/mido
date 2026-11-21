@@ -133,6 +133,70 @@ if you attempt to save a file with no tracks or with more than one
 track.
 
 
+Detecting Channel Conflicts
+---------------------------
+
+When two arrangement tracks send their events on the same MIDI channel
+they share one voice state on playback: note on/off events from one
+track can cut off notes from the other, and program or bank changes in
+one track switch the instrument for everything on that channel.
+
+The ``detect_conflicts()`` method scans the file (without modifying it)
+and returns a :class:`~mido.midifiles.diagnostics.ConflictReport`::
+
+    report = mid.detect_conflicts()
+    if report:
+        print(report.format())
+
+Each :class:`~mido.midifiles.diagnostics.Conflict` carries its type,
+the absolute tick and channel, the note number (when applicable) and the
+events involved, each located by track and message index. The report is
+a sequence, so you can also inspect it programmatically::
+
+    for conflict in report:
+        print(conflict.type, conflict.tick, conflict.channel,
+              [event.track for event in conflict.events])
+
+Five kinds of conflicts are reported:
+
+* ``overlap`` -- two notes on the same channel and pitch sound at the
+  same time, inside one track or across tracks.
+* ``orphan_note_off`` -- a note off (or a note on with velocity 0, which
+  is equivalent) with no matching active note.
+* ``dangling_note`` -- a note still active at the end of its track.
+* ``program_conflict`` -- different ``program_change`` values sent to the
+  same channel from different tracks.
+* ``bank_conflict`` -- different bank select (control 0 or 32) values
+  sent to the same channel from different tracks.
+
+Some conventions are applied by default:
+
+* A ``note_on`` with velocity 0 is treated as a note off, as
+  synthesizers do.
+* Channel 10 (index 9) is the drum/percussion channel, where notes are
+  one-shot sounds; note lifecycle checks are skipped there while
+  program and bank conflicts are still reported. Set
+  ``drum_channel=None`` to treat it as an ordinary channel.
+* ``ignored_channels`` lets you skip channels completely.
+* When several identical notes overlap, note off events can be paired
+  with the newest note (``overlap_strategy='lifo'``, the default) or the
+  oldest (``overlap_strategy='fifo'``). Overlap detection itself is
+  independent of this choice.
+
+::
+
+    from mido import detect_conflicts
+
+    report = detect_conflicts(mid, overlap_strategy='fifo',
+                              ignored_channels=[9], drum_channel=None)
+
+Type 0 and type 1 files are analysed across tracks on a common tick
+timeline. In a type 2 file every track is an independent,
+unsynchronised sequence, so each track is analysed on its own and no
+cross-track program or bank conflicts are reported. The scan never
+rewrites the file.
+
+
 Playback Length
 ---------------
 

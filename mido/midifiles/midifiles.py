@@ -472,6 +472,22 @@ class MidiFile:
             for track in self.tracks:
                 write_track(outfile, track)
 
+    def detect_conflicts(self, overlap_strategy='lifo',
+                         ignored_channels=None, drum_channel=9):
+        """Scan the file for channel and note conflicts.
+
+        This is a convenience wrapper around
+        :func:`mido.midifiles.diagnostics.detect_conflicts`. The file is
+        only read, never modified or rewritten. See that function for the
+        meaning of the arguments and the structure of the returned
+        report.
+        """
+        from .diagnostics import detect_conflicts
+        return detect_conflicts(
+            self, overlap_strategy=overlap_strategy,
+            ignored_channels=ignored_channels,
+            drum_channel=drum_channel)
+
     def print_tracks(self, meta_only=False):
         """Prints out all messages in a .midi file.
 
