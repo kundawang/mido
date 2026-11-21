@@ -17,6 +17,23 @@ Release History
 ---------------
 
 
+Unreleased
+^^^^^^^^^^
+
+* MidiFile: Add optional on-demand track loading with ``lazy=True``. The
+  initial read scans only the header and ``MTrk`` chunk directory;
+  individual tracks are decoded and cached when first accessed. Supported
+  sources are filenames (re-opened per track, no descriptor kept),
+  seekable file objects (read in place, caller keeps ownership) and
+  forward-only streams (spooled to a temporary file). ``tracks`` becomes
+  a list-compatible ``LazyTrackList``; behaviour matches eager loading
+  for track order, running status, unknown meta messages, truncation and
+  save/read round-trips. See :ref:`lazy-tracks`.
+
+* Bugfix MidiFile: Restore the meta message charset even when decoding
+  raises, so a failed read cannot leak a non-default charset process-wide.
+
+
 1.3.0 (2023-07-21)
 ^^^^^^^^^^^^^^^^^^
 

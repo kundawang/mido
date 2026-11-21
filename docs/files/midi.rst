@@ -38,7 +38,8 @@ To print out all messages in the file, you can do::
 
 The entire file is read into memory. Thus you can freely modify tracks
 and messages and save the file back by calling the ``save()``
-method. (More on this below.)
+method. (More on this below.) If you only need a few tracks from a large
+file, see :ref:`lazy-tracks` for loading tracks on demand.
 
 
 Iterating Over Messages
@@ -111,6 +112,58 @@ a file object by using the ``file`` keyword parameter. if you pass a file
 object to ``MidiFile`` as a context manager, the file is not closed when
 the context manager exits.
 Examples can be found in ``test_midifiles2.py``.
+
+
+.. _lazy-tracks:
+
+Loading Tracks on Demand
+------------------------
+
+By default the whole file is decoded when it is opened. For large files
+with many tracks (a stage-control file can easily have hundreds), pass
+``lazy=True`` to scan only the header and the ``MTrk`` chunk directory
+and decode each track when it is first accessed::
+
+    from mido import MidiFile
+
+    mid = MidiFile('show.mid', lazy=True)
+    drums = mid.tracks[42]        # only track 42 is decoded here
+    name = drums.name             # cached afterwards
+
+The ``tracks`` attribute is then a
+:class:`~mido.midifiles.midifiles.LazyTrackList`, a :class:`list`-like
+mutable sequence. Track order, running status, unknown meta messages,
+truncated tracks and save/read round-trips behave exactly as in eager
+mode. Decoded tracks are cached, so accessing the same track twice does
+not read it again. Use ``mid.tracks.is_loaded(i)`` to check whether a
+track has been decoded and ``mid.tracks.load_all()`` to decode the rest.
+
+What the source type allows:
+
+* **Filename** (``MidiFile(path, lazy=True)``): the initial scan opens
+  and closes the file, and every uncached track re-opens it. No file
+  descriptor is held open between accesses. If the file is deleted or
+  replaced, uncached tracks fail while cached ones remain available.
+* **Seekable file object** (``MidiFile(file=..., lazy=True)``): the
+  object is read in place. You keep ownership and the position is
+  restored after each access; ``MidiFile`` never closes it. If you close
+  it yourself, cached tracks still work and uncached tracks raise
+  ``ValueError``.
+* **Non-seekable stream** (a pipe/socket with no ``seek()``): the whole
+  stream is copied to an anonymous temporary file while opening, so
+  memory use stays low but disk space equal to the file size is used.
+  Reading starts at the stream's current position, as in eager mode.
+
+Call ``mid.close()`` to release the source explicitly. Tracks decoded
+before ``close()`` remain usable; accessing an undecoded track afterwards
+raises ``ValueError``. A spooled temporary file is removed on
+``close()`` (or when the object is garbage collected).
+
+.. note::
+
+    Operations that need every track, such as :attr:`MidiFile.length`,
+    ``merged_track`` or iterating over the file, still decode all
+    tracks. Lazy loading helps when only some tracks are inspected.
 
 
 File Types

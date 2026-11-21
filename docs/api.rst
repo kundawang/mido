@@ -169,6 +169,11 @@ Standard MIDI Files
    :inherited-members:
    :undoc-members:
 
+.. autoclass:: LazyTrackList
+   :members:
+   :inherited-members:
+   :undoc-members:
+
 .. autoclass:: MidiTrack
    :members:
    :inherited-members:

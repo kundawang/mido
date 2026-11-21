@@ -157,8 +157,10 @@ def meta_charset(tmp_charset):
     global _charset
     old = _charset
     _charset = tmp_charset
-    yield
-    _charset = old
+    try:
+        yield
+    finally:
+        _charset = old
 
 
 def check_int(value, low, high):

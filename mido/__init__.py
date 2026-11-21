@@ -107,6 +107,7 @@ from .messages import (
 )
 from .midifiles import (
     KeySignatureError,
+    LazyTrackList,
     MetaMessage,
     MidiFile,
     MidiTrack,
@@ -123,6 +124,7 @@ from .version import version_info
 
 __all__ = [
     "KeySignatureError",
+    "LazyTrackList",
     "MAX_PITCHWHEEL",
     "MAX_SONGPOS",
     "MIN_PITCHWHEEL",

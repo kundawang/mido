@@ -19,9 +19,15 @@ http://www.recordingblogs.com/sa/tabid/82/EntryId/44/MIDI-Part-XIII-Delta-time-a
 http://www.sonicspot.com/guide/midifiles.html
 """
 
+import operator
+import shutil
 import string
 import struct
+import tempfile
+import threading
 import time
+from collections.abc import MutableSequence
+from contextlib import contextmanager
 from numbers import Integral
 
 from ..messages import SPEC_BY_STATUS, Message
@@ -60,6 +66,9 @@ class DebugFileWrapper:
 
     def tell(self):
         return self.file.tell()
+
+    def seek(self, offset, whence=0):
+        return self.file.seek(offset, whence)
 
 
 def read_byte(self):
@@ -226,6 +235,382 @@ def read_track(infile, debug=False, clip=False):
     return track
 
 
+class _TrackEntry:
+    """Location of an as-yet undecoded track in the source file.
+
+    ``offset`` points at the first byte of the ``MTrk`` chunk header and
+    ``size`` is the declared chunk size (that is, the number of bytes
+    following the header).
+    """
+
+    __slots__ = ('offset', 'size')
+
+    def __init__(self, offset, size):
+        self.offset = offset
+        self.size = size
+
+    def __repr__(self):
+        return f'_TrackEntry(offset={self.offset}, size={self.size})'
+
+
+class _RestoringFileView:
+    """Temporary seek view over a caller-owned file.
+
+    The position is saved on creation and restored on ``restore()``, so
+    reading a lazy track does not move the caller's file position.
+    """
+
+    def __init__(self, file):
+        self.file = file
+        self._position = file.tell()
+
+    def read(self, size):
+        return self.file.read(size)
+
+    def tell(self):
+        return self.file.tell()
+
+    def seek(self, offset, whence=0):
+        return self.file.seek(offset, whence)
+
+    def restore(self):
+        try:
+            self.file.seek(self._position)
+        except (AttributeError, OSError, ValueError):
+            pass
+
+
+class _TrackSource:
+    """Base class for lazily readable track sources."""
+
+    #: Human-readable description used in error messages.
+    kind = 'source'
+
+    def __init__(self):
+        self.closed = False
+        self._lock = threading.RLock()
+
+    @contextmanager
+    def open(self):
+        """Yield a seekable file-like object positioned at the start."""
+        if self.closed:
+            raise ValueError(
+                f'cannot read track: {self.kind} is closed')
+        with self._open() as infile:
+            yield infile
+
+    @contextmanager
+    def _open(self):
+        raise NotImplementedError
+
+    def scan(self, debug=False):
+        """Read the header and track directory without decoding tracks."""
+        with self.open() as infile:
+            if debug:
+                infile = DebugFileWrapper(infile)
+                _dbg('Header:')
+            (file_type,
+             num_tracks,
+             ticks_per_beat) = read_file_header(infile)
+            if debug:
+                _dbg('-> type={}, tracks={}, ticks_per_beat={}'.format(
+                    file_type, num_tracks, ticks_per_beat))
+                _dbg()
+            entries = _scan_track_directory(infile, num_tracks)
+        return file_type, ticks_per_beat, entries
+
+    def decode_track(self, entry, charset, debug=False, clip=False):
+        """Decode one track from the source."""
+        with self._lock:
+            with self.open() as infile:
+                infile.seek(entry.offset)
+                if debug:
+                    infile = DebugFileWrapper(infile)
+                    _dbg(f'-> size={entry.size}')
+                    _dbg()
+                with meta_charset(charset):
+                    return read_track(infile, debug=debug, clip=clip)
+
+    def close(self):
+        self.closed = True
+
+
+class _TrackLoader:
+    """Callable that decodes one ``_TrackEntry`` from a source.
+
+    Kept separate from :class:`MidiFile` so the loader does not keep a
+    reference cycle alive through the track list.
+    """
+
+    __slots__ = ('source', 'charset', 'debug', 'clip')
+
+    def __init__(self, source, charset, debug, clip):
+        self.source = source
+        self.charset = charset
+        self.debug = debug
+        self.clip = clip
+
+    def __call__(self, entry):
+        return self.source.decode_track(
+            entry,
+            charset=self.charset,
+            debug=self.debug,
+            clip=self.clip,
+        )
+
+
+class _PathSource(_TrackSource):
+    """Read tracks by re-opening a file name.
+
+    No file handle is kept between accesses, so a lazily opened
+    ``MidiFile`` never holds a descriptor open. The file is re-opened
+    for each uncached track, so deleting or replacing it after the
+    initial scan affects later access.
+    """
+
+    kind = 'source file'
+
+    def __init__(self, filename):
+        super().__init__()
+        self.filename = filename
+
+    @contextmanager
+    def _open(self):
+        with open(self.filename, 'rb') as infile:
+            yield infile
+
+
+class _FileSource(_TrackSource):
+    """Read tracks from a caller-owned seekable file object.
+
+    The caller keeps ownership: the file is never closed here, and its
+    position is restored after every scan or decode. If the caller
+    closes the file, cached tracks remain readable while uncached track
+    access raises a descriptive ``ValueError``.
+    """
+
+    kind = 'source file'
+
+    def __init__(self, file, owns_file=False):
+        super().__init__()
+        self.file = file
+        self._owns_file = owns_file
+
+    @contextmanager
+    def _open(self):
+        if getattr(self.file, 'closed', False):
+            raise ValueError(
+                'cannot read track: the source file has been closed')
+        # Do not rely on ``closed`` alone: some file-like objects (for
+        # example an object wrapping a closed descriptor) only fail on
+        # read. Probe with tell() so the error is descriptive.
+        try:
+            view = _RestoringFileView(self.file)
+        except (AttributeError, OSError, ValueError) as exc:
+            raise ValueError(
+                'cannot read track: the source file is not seekable'
+                ' or has been closed') from exc
+        try:
+            yield view
+        finally:
+            view.restore()
+
+    def close(self):
+        super().close()
+        if self._owns_file:
+            try:
+                self.file.close()
+            except Exception:
+                pass
+
+
+class LazyTrackList(MutableSequence):
+    """A ``tracks`` sequence that decodes tracks on first access.
+
+    It behaves like a list of :class:`MidiTrack` objects, but entries
+    that have not been accessed yet are stored as file offsets. The
+    source is read for a track only when that track is indexed,
+    iterated over or otherwise accessed, and decoded tracks are cached
+    in the sequence.
+
+    :meth:`is_loaded` reports whether an entry has been decoded and
+    :meth:`load_all` decodes the rest eagerly.
+    """
+
+    def __init__(self, entries, loader):
+        self._entries = list(entries)
+        self._loader = loader
+        self._lock = threading.RLock()
+
+    # -- helpers
+
+    def _normalize_index(self, index):
+        index = operator.index(index)
+        length = len(self._entries)
+        if index < 0:
+            index += length
+        if not 0 <= index < length:
+            raise IndexError('list index out of range')
+        return index
+
+    def _resolve(self, index):
+        entry = self._entries[index]
+        if isinstance(entry, _TrackEntry):
+            with self._lock:
+                # Re-check inside the lock so concurrent readers decode
+                # an entry only once.
+                entry = self._entries[index]
+                if isinstance(entry, _TrackEntry):
+                    entry = self._loader(entry)
+                    self._entries[index] = entry
+        return entry
+
+    def is_loaded(self, index):
+        """Return True if the track at *index* has been decoded."""
+        return not isinstance(
+            self._entries[self._normalize_index(index)], _TrackEntry)
+
+    def load_all(self):
+        """Decode every remaining track eagerly and return ``self``."""
+        with self._lock:
+            for index in range(len(self._entries)):
+                self._resolve(index)
+        return self
+
+    # -- MutableSequence interface
+
+    def __len__(self):
+        return len(self._entries)
+
+    def __getitem__(self, index):
+        if isinstance(index, slice):
+            return [self._resolve(i)
+                    for i in range(*index.indices(len(self._entries)))]
+        return self._resolve(self._normalize_index(index))
+
+    def __setitem__(self, index, value):
+        with self._lock:
+            if isinstance(index, slice):
+                self._entries[index] = list(value)
+            else:
+                self._entries[self._normalize_index(index)] = value
+
+    def __delitem__(self, index):
+        with self._lock:
+            del self._entries[index]
+
+    def insert(self, index, value):
+        with self._lock:
+            self._entries.insert(index, value)
+
+    def __iter__(self):
+        for index in range(len(self._entries)):
+            yield self._resolve(index)
+
+    def __iadd__(self, values):
+        self.extend(values)
+        return self
+
+    def __add__(self, values):
+        return list(self) + list(values)
+
+    def __radd__(self, values):
+        return list(values) + list(self)
+
+    def __mul__(self, count):
+        return list(self) * count
+
+    __rmul__ = __mul__
+
+    def __reversed__(self):
+        for index in reversed(range(len(self._entries))):
+            yield self._resolve(index)
+
+    def copy(self):
+        """Return a shallow copy as a plain list."""
+        return list(self)
+
+    def sort(self, *, key=None, reverse=False):
+        with self._lock:
+            self.load_all()
+            self._entries.sort(key=key, reverse=reverse)
+
+    def __eq__(self, other):
+        if isinstance(other, LazyTrackList):
+            other = list(other)
+        elif not isinstance(other, (list, tuple)):
+            return NotImplemented
+        return list(self) == list(other)
+
+    def __ne__(self, other):
+        result = self.__eq__(other)
+        if result is NotImplemented:
+            return result
+        return not result
+
+    def __repr__(self):
+        entries = []
+        for index, entry in enumerate(self._entries):
+            entries.append(self._repr_entry(index))
+        return '[{}]'.format(',\n '.join(entries))
+
+    def _repr_entry(self, index):
+        entry = self._entries[index]
+        if isinstance(entry, _TrackEntry):
+            return f'<track {index} not loaded>'
+        return repr(entry)
+
+
+def _scan_track_directory(infile, num_tracks):
+    """Scan the chunk directory without decoding any track data.
+
+    Returns a list of ``_TrackEntry`` values. Raises the same errors
+    eager reading raises for a bad chunk name, a short chunk header or
+    a chunk that extends past the end of the file. The returned entries
+    point at each ``MTrk`` chunk header.
+    """
+    # Seeking past EOF is allowed, so the real file size is needed to
+    # validate the declared chunk sizes.
+    position = infile.tell()
+    file_size = infile.seek(0, 2)
+    infile.seek(position)
+
+    entries = []
+    for _ in range(num_tracks):
+        header_offset = infile.tell()
+        header = infile.read(8)
+        if len(header) < 8:
+            raise EOFError
+        name, size = struct.unpack('>4sL', header)
+        if name != b'MTrk':
+            raise OSError('no MTrk header at start of track')
+
+        chunk_end = header_offset + 8 + size
+        if chunk_end > file_size:
+            raise EOFError
+        infile.seek(chunk_end)
+        entries.append(_TrackEntry(header_offset, size))
+
+    return entries
+
+
+def _is_seekable(infile):
+    """Return True if *infile* supports seek() and tell()."""
+    try:
+        seekable = getattr(infile, 'seekable', None)
+        if seekable is not None:
+            if callable(seekable):
+                if not seekable():
+                    return False
+            elif not seekable:
+                return False
+        position = infile.tell()
+        infile.seek(position)
+    except (AttributeError, OSError, TypeError, ValueError):
+        return False
+    return True
+
+
 def write_chunk(outfile, name, data):
     """Write an IFF chunk to the file.
 
@@ -289,12 +674,43 @@ def get_seconds_per_tick(tempo, ticks_per_beat):
 
 
 class MidiFile:
+    """A Standard MIDI File.
+
+    Pass ``lazy=True`` to scan the file header and track directory up
+    front and decode each track only when it is first accessed. This is
+    useful for large files (for example, hundreds of tracks where only
+    a few are needed): the initial read stays proportional to the
+    number of tracks instead of the amount of message data.
+
+    With ``lazy=True`` the ``tracks`` attribute is a
+    :class:`LazyTrackList` (a mutable sequence that otherwise behaves
+    like a list). Decoded tracks are cached, so repeated access does not
+    touch the source again.
+
+    Lazy mode has these source requirements:
+
+    * ``filename``: the file is re-opened for each uncached track, so no
+      descriptor stays open between accesses.
+    * ``file``: a seekable file object is read in place. The caller
+      keeps ownership; the position is restored after every access, and
+      the object is never closed by ``MidiFile``.
+    * ``file`` that is not seekable (a pipe or socket): the stream is
+      spooled to an anonymous temporary file during construction, using
+      disk instead of memory. The spool is closed by :meth:`close` or
+      when the ``MidiFile`` is garbage collected.
+
+    Call :meth:`close` to drop the source explicitly; already-decoded
+    tracks stay accessible, while accessing an undecoded track then
+    raises ``ValueError``.
+    """
+
     def __init__(self, filename=None, file=None,
                  type=1, ticks_per_beat=DEFAULT_TICKS_PER_BEAT,
                  charset='latin1',
                  debug=False,
                  clip=False,
-                 tracks=None
+                 tracks=None,
+                 lazy=False,
                  ):
 
         self.filename = filename
@@ -303,9 +719,11 @@ class MidiFile:
         self.charset = charset
         self.debug = debug
         self.clip = clip
+        self.lazy = bool(lazy)
 
         self.tracks = []
         self._merged_track = None
+        self._source = None
 
         if type not in range(3):
             raise ValueError(
@@ -314,10 +732,16 @@ class MidiFile:
         if tracks is not None:
             self.tracks = tracks
         elif file is not None:
-            self._load(file)
-        elif self.filename is not None:
-            with open(filename, 'rb') as file:
+            if self.lazy:
+                self._load_lazy(self._open_lazy_source(file))
+            else:
                 self._load(file)
+        elif self.filename is not None:
+            if self.lazy:
+                self._load_lazy(_PathSource(self.filename))
+            else:
+                with open(filename, 'rb') as file:
+                    self._load(file)
 
     @property
     def merged_track(self):
@@ -372,6 +796,65 @@ class MidiFile:
                                               debug=self.debug,
                                               clip=self.clip))
                 # TODO: used to ignore EOFError. I hope things still work.
+
+    def _load_lazy(self, source):
+        """Scan *source* and expose its tracks without decoding them."""
+        try:
+            file_type, ticks_per_beat, entries = source.scan(
+                debug=self.debug)
+        except BaseException:
+            # Release a spooled temporary file when the scan fails.
+            source.close()
+            raise
+        self.type = file_type
+        self.ticks_per_beat = ticks_per_beat
+        self._source = source
+        self.tracks = LazyTrackList(
+            entries,
+            loader=_TrackLoader(source, self.charset, self.debug, self.clip),
+        )
+
+    def _open_lazy_source(self, infile):
+        """Build a lazily readable source for a caller-supplied stream."""
+        if _is_seekable(infile):
+            return _FileSource(infile)
+
+        # A forward-only stream cannot be seeked back to a track
+        # boundary. Spool it to an anonymous temporary file so lazy
+        # access still works; memory use stays constant while the
+        # spooled bytes live on disk.
+        spool = tempfile.TemporaryFile()
+        try:
+            shutil.copyfileobj(infile, spool)
+            spool.seek(0)
+            source = _FileSource(spool, owns_file=True)
+        except BaseException:
+            spool.close()
+            raise
+        return source
+
+    def __del__(self):
+        # Closing an anonymous TemporaryFile also unlinks it. Cached
+        # tracks do not need the source, so this is safe to do here.
+        source = getattr(self, '_source', None)
+        if source is not None:
+            try:
+                source.close()
+            except Exception:
+                pass
+
+    def close(self):
+        """Release the source used for on-demand track loading.
+
+        Already-decoded tracks remain accessible. Accessing a track
+        that has not been decoded yet raises ``ValueError`` afterwards.
+        A file object passed by the caller is never closed by this
+        method; a spooled forward-only stream is.
+        """
+        source = self._source
+        if source is not None:
+            source.close()
+            self._source = None
 
     @property
     def length(self):
@@ -489,7 +972,12 @@ class MidiFile:
 
     def __repr__(self):
         if self.tracks:
-            tracks_str = ',\n'.join(repr(track) for track in self.tracks)
+            if isinstance(self.tracks, LazyTrackList):
+                tracks_str = ',\n'.join(
+                    self.tracks._repr_entry(index)
+                    for index in range(len(self.tracks)))
+            else:
+                tracks_str = ',\n'.join(repr(track) for track in self.tracks)
             tracks_str = '  ' + tracks_str.replace('\n', '\n  ')
             tracks_str = f', tracks=[\n{tracks_str}\n]'
         else:
@@ -508,4 +996,10 @@ class MidiFile:
         return self
 
     def __exit__(self, type, value, traceback):
+        # Release a spooled source when leaving a ``with`` block, but
+        # keep the documented rule that a caller-supplied file object is
+        # never closed by MidiFile.
+        source = self._source
+        if source is not None and getattr(source, '_owns_file', False):
+            self.close()
         return False
