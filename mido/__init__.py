@@ -99,7 +99,7 @@ from .backends.backend import Backend
 from .messages import (Message, parse_string, parse_string_stream,
                        format_as_string, MIN_PITCHWHEEL, MAX_PITCHWHEEL,
                        MIN_SONGPOS, MAX_SONGPOS)
-from .midifiles import (MidiFile, MidiTrack, merge_tracks,
+from .midifiles import (MidiFile, MidiTrack, merge_tracks, slice_track,
                         MetaMessage, UnknownMetaMessage,
                         bpm2tempo, tempo2bpm, tick2second, second2tick,
                         KeySignatureError)

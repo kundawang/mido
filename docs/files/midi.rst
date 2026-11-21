@@ -146,6 +146,34 @@ a type 2 file will raise ``ValueError``, since it is impossible to
 compute the playback time of an asynchronous file.
 
 
+Slicing
+-------
+
+You can cut a time slice out of a file, for example to loop a section
+of a longer song::
+
+    battle = mid.slice(1920, 3840)            # absolute ticks
+    battle = mid.slice(4.0, 8.0, seconds=True)
+
+This returns a new ``MidiFile`` with the half-open interval
+``[start, end)``. The new file has the same type and tracks, message
+times are relative to the start of the slice, and the source file is
+not modified. The result can be saved like any other file.
+
+To make the slice play correctly on its own, the state at the start of
+the slice (tempo, bank select, program changes and active controllers)
+is replayed at time 0 of each track, and notes that are sounding at
+the start are re-articulated there. Notes that are still sounding at
+the end of the slice are by default closed with a generated
+``note_off`` (``note_policy='truncate'``). Pass
+``note_policy='keep'`` to keep their original ``note_off`` messages
+instead, even if they fall outside the slice.
+
+Slicing a type 2 file by seconds raises ``ValueError``, since the
+tracks have no shared timeline. Slicing by ticks works and slices each
+track independently.
+
+
 Meta Messages
 -------------
 

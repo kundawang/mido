@@ -27,7 +27,7 @@ from numbers import Integral
 
 from .meta import (MetaMessage, build_meta_message, meta_charset,
                    encode_variable_int)
-from .tracks import MidiTrack, merge_tracks, fix_end_of_track
+from .tracks import MidiTrack, merge_tracks, fix_end_of_track, slice_track
 from .units import tick2second
 from ..messages import Message, SPEC_BY_STATUS
 
@@ -290,6 +290,32 @@ def get_seconds_per_tick(tempo, ticks_per_beat):
     return (tempo / 1000000.0) / ticks_per_beat
 
 
+def _second2tick(midifile, second):
+    """Convert a time in seconds to absolute ticks.
+
+    Follows the tempo map of the merged track, so tempo changes are
+    taken into account. Times past the last message are extrapolated
+    with the last active tempo.
+    """
+    tempo = DEFAULT_TEMPO
+    ticks = 0
+    seconds = 0.0
+
+    for msg in midifile.merged_track:
+        if msg.time > 0:
+            delta = tick2second(msg.time, midifile.ticks_per_beat, tempo)
+            if seconds + delta >= second:
+                scale = get_seconds_per_tick(tempo, midifile.ticks_per_beat)
+                return int(round(ticks + (second - seconds) / scale))
+            seconds += delta
+            ticks += msg.time
+        if msg.type == 'set_tempo':
+            tempo = msg.tempo
+
+    scale = get_seconds_per_tick(tempo, midifile.ticks_per_beat)
+    return int(round(ticks + (second - seconds) / scale))
+
+
 class MidiFile:
     def __init__(self, filename=None, file=None,
                  type=1, ticks_per_beat=DEFAULT_TICKS_PER_BEAT,
@@ -398,6 +424,67 @@ class MidiFile:
 
             if msg.type == 'set_tempo':
                 tempo = msg.tempo
+
+    def slice(self, start=None, end=None, seconds=False,
+              note_policy='truncate'):
+        """Return a new MidiFile with a slice of this file.
+
+        The slice is the half-open interval [start, end). By default
+        `start` and `end` are absolute times in ticks; pass
+        seconds=True to give them in seconds instead (tempo changes
+        are taken into account). The default `start` is 0 and the
+        default `end` is the end of the file.
+
+        Each track is sliced independently, so the new file has the
+        same type and the same number of tracks, and messages keep
+        their track and their relative timing inside the slice. The
+        source file is not modified.
+
+        To make the slice playable on its own, the state at the start
+        of the slice (tempo, bank select, program changes and active
+        controllers) is replayed at time 0 of each track, and notes
+        that cross the start of the slice are re-articulated there.
+        Notes that are still sounding at the end of the slice are
+        closed with a generated note_off (note_policy='truncate', the
+        default) or keep their original note_off even if it falls
+        outside the slice (note_policy='keep'). See slice_track() for
+        details.
+
+        Slicing a type 2 (asynchronous) file by seconds is not
+        possible since the tracks have no shared timeline, and raises
+        ValueError. Slicing by ticks works and slices each track
+        independently.
+        """
+        if seconds and self.type == 2:
+            raise ValueError(
+                'impossible to slice type 2 (asynchronous) file'
+                ' by seconds')
+
+        if start is None:
+            start_tick = 0
+        elif seconds:
+            start_tick = _second2tick(self, start)
+        else:
+            start_tick = start
+
+        if end is None:
+            # The interval is half-open, so one is added to include
+            # the messages at the very end of the file.
+            end_tick = max((sum(msg.time for msg in track)
+                            for track in self.tracks), default=0) + 1
+        elif seconds:
+            end_tick = _second2tick(self, end)
+        else:
+            end_tick = end
+
+        tracks = [slice_track(track, start_tick, end_tick,
+                              note_policy=note_policy)
+                  for track in self.tracks]
+
+        return MidiFile(type=self.type,
+                        ticks_per_beat=self.ticks_per_beat,
+                        charset=self.charset,
+                        tracks=tracks)
 
     def play(self, meta_messages=False, now=time.time):
         """Play back all tracks.
