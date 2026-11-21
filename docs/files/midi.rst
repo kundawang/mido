@@ -245,3 +245,87 @@ If you have a lot of rounding errors you should increase the time resolution
 with more ticks per quarter note, by setting MidiFile.ticks_per_beat to a
 large number. Typical values range from 96 to 480 but some use even more ticks
 per quarter note.
+
+
+Semantic Diff and Patch
+-----------------------
+
+When two arrangements of the same piece are submitted, a binary diff only
+tells you that the file changed. The diffing module describes the change in
+musical terms: which event was added, removed or modified, on which track and
+at which absolute tick, while preserving the order of events that occur at the
+same tick.
+
+A report is produced with :py:func:`mido.diff_midi` and applied back with
+:py:func:`mido.apply_patch`::
+
+    from mido import MidiFile, diff_midi, apply_patch
+
+    old = MidiFile('arrangement_v1.mid')
+    new = MidiFile('arrangement_v2.mid')
+
+    report = diff_midi(old, new)
+    print(report.to_text())
+
+    # Rebuild the new version from the old one.
+    patched = apply_patch(old, report)
+    patched.save('arrangement_v2_rebuilt.mid')
+
+The report is plain data and can be stored or exchanged as JSON::
+
+    text = report.to_json()
+    from mido import MidiDiff
+    report = MidiDiff.from_json(text)
+
+How events are identified
+^^^^^^^^^^^^^^^^^^^^^^^^^
+
+Each event is anchored by a triple ``(track index, absolute tick, ordinal)``
+where the *ordinal* is the position of the event among the events sharing the
+same tick. This keeps simultaneous events in their intended order, for example
+a control change immediately before a note on at the same tick.
+
+The event content is identified by a *fingerprint*: its canonical wire
+encoding with the delta time stripped. Meta messages (including unknown meta
+types) and SysEx payloads are therefore compared byte for byte.
+
+``end_of_track`` messages are not part of the model. They are structural
+markers that ``MidiFile`` regenerates on every save, so they would only add
+noise and cannot anchor an edit.
+
+Conflict handling
+^^^^^^^^^^^^^^^^^
+
+Applying a report first verifies that the source file still matches the file
+the report was generated from, by comparing the full semantic layout. If the
+source has drifted, :py:class:`mido.PatchConflictError` is raised and its
+``conflicts`` attribute locates every problem down to the track (and, where
+applicable, the tick and ordinal)::
+
+    from mido import PatchConflictError
+
+    try:
+        patched = apply_patch(changed_source, report)
+    except PatchConflictError as error:
+        for conflict in error.conflicts:
+            print(conflict)
+
+A successful patch always produces a file semantically identical to the
+original new version; this is checked against the target layout stored in the
+report before the file is returned.
+
+Policies and limitations
+^^^^^^^^^^^^^^^^^^^^^^^^
+
+* Neither input object is modified: the patched file is built from copies and
+  owns all of its messages.
+* Empty tracks and duplicate (byte-identical) events are fully supported.
+  Reports are deterministic, so diffing the same files twice yields the same
+  JSON.
+* The two files must use the same ``ticks_per_beat`` and the same file type
+  (0 or 1). Type 2 (asynchronous) files are rejected, because their tracks do
+  not share a tick timeline. Rescale or convert the files first if they
+  differ in either respect.
+* Tracks are matched by index; added or removed tracks appear as whole-track
+  operations in the report.
+

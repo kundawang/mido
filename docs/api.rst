@@ -189,6 +189,55 @@ Standard MIDI Files
 
 .. autofunction:: merge_tracks
 
+Semantic diff and patch
+"""""""""""""""""""""""
+
+.. module:: mido
+   :noindex:
+
+.. autofunction:: diff_midi
+
+.. autofunction:: apply_patch
+
+.. autofunction:: semantic_equal
+
+.. autofunction:: file_signature
+
+.. autoclass:: MidiDiff
+   :members:
+   :undoc-members:
+
+.. autoclass:: TrackDiff
+   :members:
+   :undoc-members:
+
+.. autoclass:: DiffOp
+   :members:
+   :undoc-members:
+
+.. autoclass:: TrackOp
+   :members:
+   :undoc-members:
+
+.. autoclass:: Event
+   :members:
+   :undoc-members:
+
+.. autoclass:: PlacedEvent
+   :members:
+   :undoc-members:
+
+.. autoclass:: Conflict
+   :members:
+   :undoc-members:
+
+.. autoexception:: DiffError
+
+.. autoexception:: IncompatibleFilesError
+
+.. autoexception:: PatchConflictError
+   :members:
+
 .. module:: mido.midifiles
 
 .. todo: Expose more of the internal API? (meta, tracks, units…)
