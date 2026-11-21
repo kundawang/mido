@@ -16,6 +16,29 @@ This project uses `Semantic Versioning <https://semver.org>`_.
 Release History
 ---------------
 
+Unreleased
+^^^^^^^^^^
+
+* New output port queue: ``BaseOutput`` (and therefore
+  ``mido.open_output()`` and ``mido.open_ioport()``) accepts
+  ``queue_size``, ``queue_policy`` (``block``/``timeout``/``reject``),
+  ``queue_timeout`` and ``close_timeout``. When enabled, a background
+  worker writes messages to the device in FIFO order, so a slow device
+  no longer blocks ``send()``. Queueing is off by default and the
+  original synchronous behaviour is unchanged.
+
+* New ``BaseOutput.flush()``, ``QueueAborted`` and the ``pending``,
+  ``peak_pending``, ``sent_count``, ``dropped_count`` and
+  ``last_error`` queue statistics/properties. Background ``_send()``
+  errors are re-raised by ``flush()`` and by later ``send()`` calls.
+
+* ``reset()`` and ``panic()`` are prioritised in queued mode;
+  ``panic()`` discards waiting normal and reset messages and aborts
+  senders blocked on a full queue.
+
+* The rtmidi backend now implements ``_send()`` instead of overriding
+  ``send()``, so output queue options work with it and ``send()``
+  performs the usual message type check and copy.
 
 1.3.0 (2023-07-21)
 ^^^^^^^^^^^^^^^^^^

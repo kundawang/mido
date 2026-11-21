@@ -159,7 +159,12 @@ class Backend:
 
             kwargs = self._add_api(kwargs)
 
-            return ports.IOPort(self.module.Input(input_name, **kwargs),
+            # Output queue options belong to the output side only.
+            # Strip them from the input port's arguments.
+            input_kwargs = dict(kwargs)
+            ports.extract_queue_options(input_kwargs)
+
+            return ports.IOPort(self.module.Input(input_name, **input_kwargs),
                                 self.module.Output(output_name, **kwargs))
 
     def _get_devices(self, **kwargs):

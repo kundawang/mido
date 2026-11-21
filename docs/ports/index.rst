@@ -134,6 +134,85 @@ not be turned off gracefully, but will stop immediately with no regard
 to decay time.
 
 
+Queued output
+^^^^^^^^^^^^^
+
+By default ``send()`` talks to the device right away. If the device is
+slow, a burst of messages blocks the sending thread, and an emergency
+stop cannot get through until the backlog has been written.
+
+Pass ``queue_size`` when opening an output port to move the device I/O
+to a background worker::
+
+    outport = mido.open_output('Integra-7', queue_size=256)
+
+``send()`` now validates and copies the message, appends it to a
+bounded queue and returns immediately. The worker writes messages to
+the device in FIFO order. If several threads send at the same time the
+order is the order in which they acquired the queue, and each
+``send()`` returns a monotonically increasing sequence number (``None``
+is returned as before when queueing is off).
+
+The queue options are:
+
+``queue_size`` (or ``max_queue_size``)
+    Maximum number of waiting messages. Must be a non-negative integer.
+    ``None`` (the default) keeps the original synchronous behaviour.
+    ``0`` makes a *rendezvous* port: nothing is buffered, and a blocking
+    ``send()`` returns once the worker has taken the message.
+
+``queue_policy``
+    What a full queue does:
+
+    * ``'block'`` (default) -- wait for room, for the port to close, or
+      for a background error.
+    * ``'timeout'`` -- wait up to ``queue_timeout`` seconds, then raise
+      :class:`queue.Full`.
+    * ``'reject'`` -- raise :class:`queue.Full` immediately.
+
+``queue_timeout``
+    Seconds to wait with ``queue_policy='timeout'``. Defaults to ``0``.
+
+``close_timeout``
+    Seconds ``close()`` waits for the queue to drain (default 1.0;
+    ``None`` waits forever). Pending messages are discarded if it
+    expires. If the worker is still inside a device write it finishes
+    that write and closes the device itself, so ``close()`` never
+    touches the device while a write is in progress.
+
+Use ``flush()`` to wait until everything has been written::
+
+    outport.flush()          # raise TimeoutError after the timeout
+    outport.flush(timeout=2)
+
+A background device error is not lost: ``flush()`` re-raises it,
+``outport.last_error`` returns it and later ``send()`` calls raise it
+too. Messages still waiting when the error occurs are discarded and
+counted in ``outport.dropped_count``.
+
+``reset()`` and ``panic()`` never wait for room. ``reset()`` places its
+messages ahead of normal messages (but keeps them). ``panic()`` is an
+emergency stop: it discards the waiting normal and reset messages and
+puts its "all sounds off" messages at the very front. A message already
+being written cannot be interrupted. Senders blocked on a full queue
+are aborted by ``panic()`` and raise :class:`~mido.ports.QueueAborted`.
+Panic messages themselves are never dropped.
+
+``pending``, ``peak_pending``, ``sent_count`` and ``dropped_count``
+expose queue statistics, which is handy for tuning the size against a
+real device::
+
+    outport.send(msg)
+    ...
+    print(outport.pending, outport.peak_pending)
+
+Queue hints are ignored by backends that do not subclass
+``BaseOutput``, and input ports reject them with ``ValueError``.
+An I/O port created with ``mido.open_ioport()`` applies them to its
+output side.
+
+
+
 Input
 -----
 

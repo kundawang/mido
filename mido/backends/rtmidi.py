@@ -204,10 +204,10 @@ class Output(PortCommon, ports.BaseOutput):
                                virtual=virtual, api=self.api)
         self.closed = False
 
-    # We override send() instead of _send() to bypass locking.
-    def send(self, msg):
-        """Send a message on the port."""
+    # Override _send() instead of send() so that the optional output
+    # queue in BaseOutput (and its validation and message copying)
+    # works. _locking is False, so use our own lock for the
+    # synchronous case.
+    def _send(self, msg):
         with self._send_lock:
             self._rt.send_message(msg.bytes())
-
-    send.__doc__ = ports.BaseOutput.send.__doc__

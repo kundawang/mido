@@ -135,6 +135,10 @@ API
    :inherited-members:
    :undoc-members:
 
+.. autoclass:: QueueAborted
+
+.. autofunction:: extract_queue_options
+
 .. autoclass:: IOPort
    :members:
    :inherited-members:
