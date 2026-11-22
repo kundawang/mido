@@ -5,6 +5,8 @@
 include README.rst LICENSE .readthedocs.yaml .flake8 .reuse/dep5
 recursive-include LICENSES *.txt
 recursive-include tests *.py
+recursive-include tests/midifiles/fixtures *.mid
+recursive-include tests/midifiles/fixtures *.rst
 recursive-include examples *.py
 recursive-include extras *.py
 include docs/_static/.gitkeep

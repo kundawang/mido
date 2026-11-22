@@ -18,6 +18,19 @@ Release History
 1.3.0 (Planned: 2023-07-20)
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
+* SMF byte-fidelity hardening. Fixed-byte fixtures for type 0/1/2 files
+  now cover running status resets, VLQ encoding boundaries, F0/F7 system
+  exclusive events, unknown meta events and end_of_track, with tests
+  asserting event semantics, rewrite readability and preserved byte
+  ranges. Malformed input (truncated header/track, bad chunk length,
+  illegal status byte, running status without a prior status) now raises
+  with the offending byte offset in the error message.
+
+* Bugfix: an F7 SysEx escape event whose payload ended with the
+  terminating F7 was mis-parsed because the leading F7 of the *next*
+  framing was treated as a data byte. F0 and F7 events are now framed
+  according to the Standard MIDI File specification.
+
 * Removed support for Python 2.7. * Mido now requires Python 3.7 or
   higher. (Ole Martin Bjørndalen, pull request #408.)
 

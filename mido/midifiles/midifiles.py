@@ -67,7 +67,8 @@ class DebugFileWrapper:
 def read_byte(self):
     byte = self.read(1)
     if byte == b'':
-        raise EOFError
+        raise EOFError(
+            f'unexpected end of file at byte offset {self.tell()}')
     else:
         return ord(byte)
 
@@ -76,7 +77,17 @@ def read_bytes(infile, size):
     if size > MAX_MESSAGE_LENGTH:
         raise OSError('Message length {} exceeds maximum length {}'.format(
             size, MAX_MESSAGE_LENGTH))
-    return [read_byte(infile) for _ in range(size)]
+    start = infile.tell()
+    data = []
+    for index in range(size):
+        try:
+            data.append(read_byte(infile))
+        except EOFError as err:
+            raise EOFError(
+                f'unexpected end of file at byte offset {infile.tell()}: '
+                f'needed {size} byte(s) starting at offset {start}, '
+                f'got {index}') from err
+    return data
 
 
 def _dbg(text=''):
@@ -92,9 +103,13 @@ def _dbg(text=''):
 # multiple of 2. This is not true of MIDI files.
 
 def read_chunk_header(infile):
+    start = infile.tell()
     header = infile.read(8)
     if len(header) < 8:
-        raise EOFError
+        raise EOFError(
+            f'unexpected end of file at byte offset {infile.tell()}: '
+            f'truncated 8-byte chunk header starting at offset {start} '
+            f'(got {len(header)} byte(s))')
 
     # TODO: check for b'RIFF' and switch endian?
 
@@ -107,10 +122,14 @@ def read_file_header(infile):
     if name != b'MThd':
         raise OSError('MThd not found. Probably not a MIDI file')
     else:
+        start = infile.tell()
         data = infile.read(size)
 
         if len(data) < 6:
-            raise EOFError
+            raise EOFError(
+                f'unexpected end of file at byte offset {infile.tell()}: '
+                f'MThd declares {size} data byte(s) starting at '
+                f'offset {start}, got {len(data)} (need at least 6)')
 
         return struct.unpack('>hhh', data[:6])
 
@@ -119,7 +138,9 @@ def read_message(infile, status_byte, peek_data, delta, clip=False):
     try:
         spec = SPEC_BY_STATUS[status_byte]
     except LookupError:
-        raise OSError(f'undefined status byte 0x{status_byte:02x}')
+        raise OSError(
+            f'undefined status byte 0x{status_byte:02x} '
+            f'at byte offset {infile.tell() - 1}')
 
     # Subtract 1 for status byte.
     size = spec['length'] - 1 - len(peek_data)
@@ -130,17 +151,29 @@ def read_message(infile, status_byte, peek_data, delta, clip=False):
     else:
         for byte in data_bytes:
             if byte > 127:
-                raise OSError('data byte must be in range 0..127')
+                raise OSError(
+                    'data byte must be in range 0..127 '
+                    f'at byte offset {infile.tell() - 1}')
 
     return Message.from_bytes([status_byte] + data_bytes, time=delta)
 
 
 def read_sysex(infile, delta, clip=False):
+    # The status byte (0xf0 or 0xf7) has already been consumed by
+    # read_track(), so remember where the event starts for error
+    # messages.
+    event_pos = infile.tell()
     length = read_variable_int(infile)
     data = read_bytes(infile, length)
 
     # Strip start and end bytes.
-    # TODO: is this necessary?
+    #
+    # An 0xf0 event is a complete system exclusive message and its
+    # payload begins with 0xf0 and ends with 0xf7. An 0xf7 event is an
+    # escape (or SysEx continuation) whose payload begins with data
+    # rather than 0xf0, so only the trailing 0xf7 is stripped there.
+    # Stripping a leading 0xf7 would expose the terminating 0xf7 of the
+    # next event as a (non-data) data byte.
     if data and data[0] == 0xf0:
         data = data[1:]
     if data and data[-1] == 0xf7:
@@ -148,6 +181,12 @@ def read_sysex(infile, delta, clip=False):
 
     if clip:
         data = [byte if byte < 127 else 127 for byte in data]
+    else:
+        for index, byte in enumerate(data):
+            if byte > 127:
+                raise OSError(
+                    'data byte must be in range 0..127 '
+                    f'at byte offset {event_pos} (sysex byte {index})')
 
     return Message('sysex', data=data, time=delta)
 
@@ -172,10 +211,12 @@ def read_meta_message(infile, delta):
 def read_track(infile, debug=False, clip=False):
     track = MidiTrack()
 
+    chunk_start = infile.tell()
     name, size = read_chunk_header(infile)
 
     if name != b'MTrk':
-        raise OSError('no MTrk header at start of track')
+        raise OSError(
+            f"no MTrk header at start of track at byte offset {chunk_start}")
 
     if debug:
         _dbg(f'-> size={size}')
@@ -189,6 +230,12 @@ def read_track(infile, debug=False, clip=False):
         if infile.tell() - start == size:
             break
 
+        if infile.tell() - start > size:
+            raise OSError(
+                f'MTrk chunk starting at offset {chunk_start} declares '
+                f'{size} byte(s) but an event runs past its end '
+                f'(current offset {infile.tell()})')
+
         if debug:
             _dbg('Message:')
 
@@ -197,11 +244,14 @@ def read_track(infile, debug=False, clip=False):
         if debug:
             _dbg(f'-> delta={delta}')
 
+        status_pos = infile.tell()
         status_byte = read_byte(infile)
 
         if status_byte < 0x80:
             if last_status is None:
-                raise OSError('running status without last_status')
+                raise OSError(
+                    'running status without last_status '
+                    f'at byte offset {status_pos}')
             peek_data = [status_byte]
             status_byte = last_status
         else:
@@ -213,8 +263,9 @@ def read_track(infile, debug=False, clip=False):
         if status_byte == 0xff:
             msg = read_meta_message(infile, delta)
         elif status_byte in [0xf0, 0xf7]:
-            # TODO: I'm not quite clear on the difference between
-            # f0 and f7 events.
+            # The SMF spec distinguishes F0 (complete SysEx) and F7
+            # (escape / continuation) events; both map onto mido's
+            # 'sysex' message type and differ only on the wire.
             msg = read_sysex(infile, delta, clip)
         else:
             msg = read_message(infile, status_byte, peek_data, delta, clip)

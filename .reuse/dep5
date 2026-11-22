@@ -8,3 +8,7 @@ Source: https://mido.readthedocs.io
 # Files: src/*
 # Copyright: $YEAR $NAME <$CONTACT>
 # License: ...
+
+Files: tests/midifiles/fixtures/*.mid
+Copyright: 2026
+License: MIT
