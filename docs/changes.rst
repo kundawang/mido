@@ -15,6 +15,21 @@ This project uses [Semantic Versioning](https://semver.org/).
 Release History
 ---------------
 
+Unreleased
+^^^^^^^^^^
+
+* Added optional bounded, incremental consumption to ``Parser``. The
+  new ``max_messages`` and ``max_message_bytes`` constructor arguments
+  cap the number of completed messages waiting to be taken and the
+  size of a single unfinished message (typically a SysEx spread across
+  feeds) respectively. Both default to unbounded, so the existing
+  ``feed()`` / ``get_message()`` path is unchanged. When a bound is
+  reached the parser raises a locatable ``ParserOverflow`` carrying a
+  ``resume_at`` index; completed messages are never lost. New
+  ``drain_messages()`` and ``consume()`` methods support batch and
+  callback consumption without buffering an entire stream, and
+  ``reset()`` returns a parser to a fresh, reusable state.
+
 1.3.0 (Planned: 2023-07-20)
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
