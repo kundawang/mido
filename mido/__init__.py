@@ -94,8 +94,9 @@ Getting started:
 """
 import os
 
-from . import ports, sockets
+from . import ports, sockets, beats
 from .backends.backend import Backend
+from .beats import BeatTracker, BeatSnapshot
 from .messages import (Message, parse_string, parse_string_stream,
                        format_as_string, MIN_PITCHWHEEL, MAX_PITCHWHEEL,
                        MIN_SONGPOS, MAX_SONGPOS)

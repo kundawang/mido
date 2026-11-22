@@ -65,6 +65,26 @@ Tokenizing
 .. todo: Add a dedicated section in the documentation.
 
 
+Beat Tracking
+-------------
+
+.. module:: mido.beats
+
+.. autoclass:: BeatTracker
+   :members:
+   :inherited-members:
+   :undoc-members:
+
+.. autoclass:: BeatSnapshot
+   :members:
+   :inherited-members:
+   :undoc-members:
+
+.. autodata:: PULSES_PER_BEAT
+
+.. autodata:: PULSES_PER_SONGPOS_UNIT
+
+
 Backends
 --------
 

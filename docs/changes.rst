@@ -20,6 +20,12 @@ Release History
 1.3.0 (Planned: 2023-07-20)
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
+* New ``mido.beats.BeatTracker`` for real-time beat and tempo tracking
+  from MIDI timing clock messages. It reports accumulated pulses, beat
+  position, transport state and a smoothed BPM estimate, tolerates
+  jitter and lost pulses without double-stepping the beat, and accepts
+  an injectable monotonic clock for deterministic testing.
+
 * Removed support for Python 2.7. * Mido now requires Python 3.7 or
   higher. (Ole Martin Bjørndalen, pull request #408.)
 
