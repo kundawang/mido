@@ -18,6 +18,7 @@ import math
 import struct
 from contextlib import contextmanager
 from numbers import Integral
+from threading import RLock
 
 from ..messages import BaseMessage, check_time
 
@@ -432,40 +433,161 @@ class MetaSpec_sequencer_specific(MetaSpec):
         return list(message.data)
 
 
-def add_meta_spec(klass):
+def _instantiate_spec(klass):
+    """Instantiate a spec class and fill in the derived attributes."""
     spec = klass()
     if not hasattr(spec, 'type'):
-        name = klass.__name__.replace('MetaSpec_', '')
-        spec.type = name
+        spec.type = klass.__name__.replace('MetaSpec_', '')
 
     # This is used by copy().
     spec.settable_attributes = set(spec.attributes) | {'time'}
-    _META_SPECS[spec.type_byte] = spec
-    _META_SPECS[spec.type] = spec
-    _META_SPEC_BY_TYPE[spec.type] = spec
+    return spec
 
 
-_META_SPECS = {}
-_META_SPEC_BY_TYPE = {}
+def _builtin_spec_classes():
+    """Return all built-in MetaSpec_* classes in definition order."""
+    return [obj for name, obj in globals().items()
+            if name.startswith('MetaSpec_') and isinstance(obj, type)
+            and issubclass(obj, MetaSpec)]
 
 
-def _add_builtin_meta_specs():
-    for name, spec in globals().items():
-        if name.startswith('MetaSpec_'):
-            add_meta_spec(spec)
+class MetaSpecRegistry:
+    """An isolated registry of meta message specs.
 
+    Each registry maps both meta type names (``'track_name'``) and
+    meta type bytes (``0x03``) to spec instances, so a whole parsing
+    session (for example a :class:`~mido.midifiles.midifiles.MidiFile`)
+    can use custom specs without other callers in the same process
+    being affected.
 
-_add_builtin_meta_specs()
+    Registries are independent: registering or removing a spec in one
+    registry never changes another registry. Spec objects themselves
+    are not shared between registries either, so mutating a spec after
+    registration cannot leak across sessions. All mutating operations
+    are protected by a re-entrant lock and are atomic with respect to
+    other threads.
+    """
 
+    def __init__(self):
+        # Both names and type bytes map to the same spec objects.
+        self._by_name = {}
+        self._by_byte = {}
+        self._lock = RLock()
 
-def build_meta_message(meta_type, data, delta=0):
-    # TODO: handle unknown type.
-    try:
-        spec = _META_SPECS[meta_type]
-    except KeyError:
-        return UnknownMetaMessage(meta_type, data)
-    else:
-        msg = MetaMessage(spec.type, time=delta)
+    @classmethod
+    def builtin(cls):
+        """Return a new registry pre-populated with the built-in specs."""
+        registry = cls()
+        for spec_class in _builtin_spec_classes():
+            registry.add(spec_class)
+        return registry
+
+    def add(self, spec_class):
+        """Register a spec class.
+
+        A fresh spec instance is created for this registry.
+
+        Re-adding the same class is a no-op that returns the existing
+        spec. Registering a different class whose type name or type
+        byte is already taken raises ``ValueError`` and leaves the
+        registry unchanged.
+        """
+        new_spec = _instantiate_spec(spec_class)
+        with self._lock:
+            existing = self._by_name.get(new_spec.type)
+            if existing is not None:
+                if type(existing) is spec_class:
+                    return existing
+                raise ValueError(
+                    f'a spec named {new_spec.type!r} is already registered')
+
+            existing = self._by_byte.get(new_spec.type_byte)
+            if existing is not None:
+                if type(existing) is spec_class:
+                    return existing
+                raise ValueError(
+                    f'type byte 0x{new_spec.type_byte:02x} is already '
+                    f'registered by spec {existing.type!r}')
+
+            new_spec.registry = self
+            self._by_name[new_spec.type] = new_spec
+            self._by_byte[new_spec.type_byte] = new_spec
+            return new_spec
+
+    # Backwards-compatible alias.
+    add_meta_spec = add
+
+    def remove(self, spec_class):
+        """Remove a previously registered spec class.
+
+        Raises ``KeyError`` if the class is not registered. Messages
+        already decoded keep working (each message holds on to its
+        spec), but new messages of the removed type can no longer be
+        created or decoded through this registry.
+        """
+        with self._lock:
+            name = _instantiate_spec(spec_class).type
+            spec = self._by_name.get(name)
+            if spec is None or type(spec) is not spec_class:
+                raise KeyError(
+                    f'spec class {getattr(spec_class, "__name__", spec_class)!r} '
+                    'is not registered')
+            del self._by_name[spec.type]
+            del self._by_byte[spec.type_byte]
+
+    def remove_meta_spec(self, spec_class):
+        """Alias for :meth:`remove` kept symmetric with the module API."""
+        self.remove(spec_class)
+
+    def __contains__(self, key):
+        with self._lock:
+            return key in self._by_name or key in self._by_byte
+
+    def get(self, key, default=None):
+        """Look up a spec by type name or type byte."""
+        with self._lock:
+            spec = self._by_name.get(key)
+            if spec is None:
+                spec = self._by_byte.get(key, default)
+            return spec
+
+    def spec_for(self, type_byte):
+        """Return the spec for a type byte, or ``None`` if unknown."""
+        with self._lock:
+            return self._by_byte.get(type_byte)
+
+    def spec_for_type(self, type_name):
+        """Return the spec for a type name, or ``None`` if unknown."""
+        with self._lock:
+            return self._by_name.get(type_name)
+
+    def copy(self):
+        """Return an independent registry with the same spec classes."""
+        clone = MetaSpecRegistry()
+        with self._lock:
+            classes = [type(spec) for spec in self._by_name.values()]
+        for spec_class in classes:
+            clone.add(spec_class)
+        return clone
+
+    def build_meta_message(self, meta_type, data, delta=0):
+        """Decode one meta message using this registry's view.
+
+        ``meta_type`` is normally a meta type byte, but a registered
+        type name is also accepted for backwards compatibility.
+
+        Unknown type bytes fall back to :class:`UnknownMetaMessage`,
+        which round-trips the raw payload unchanged.
+        """
+        spec = self.spec_for(meta_type)
+        if spec is None:
+            # Fall back to a type-name lookup (the legacy registry
+            # keyed both names and bytes in one mapping).
+            spec = self.spec_for_type(meta_type)
+        if spec is None:
+            return UnknownMetaMessage(meta_type, data, time=delta)
+
+        msg = MetaMessage(spec.type, _spec=spec, time=delta)
 
         # This adds attributes to msg:
         spec.decode(msg, data)
@@ -473,23 +595,63 @@ def build_meta_message(meta_type, data, delta=0):
         return msg
 
 
+# The process-wide default registry. The legacy module-level functions
+# and the default constructors delegate to it, so existing code keeps
+# working unchanged.
+_REGISTRY = MetaSpecRegistry.builtin()
+
+# Backwards-compatible views of the default registry's mappings.
+_META_SPECS = _REGISTRY._by_byte
+_META_SPEC_BY_TYPE = _REGISTRY._by_name
+
+
+def add_meta_spec(klass):
+    """Add a spec to the process-wide default registry.
+
+    Retained for backwards compatibility. New code should create an
+    isolated :class:`MetaSpecRegistry` and call :meth:`add` on it.
+    """
+    return _REGISTRY.add(klass)
+
+
+def remove_meta_spec(klass):
+    """Remove a spec from the process-wide default registry."""
+    _REGISTRY.remove(klass)
+
+
+def build_meta_message(meta_type, data, delta=0, registry=None):
+    """Build a meta message.
+
+    Uses ``registry`` when given, otherwise the process-wide default
+    registry. Unknown type bytes degrade to
+    :class:`UnknownMetaMessage`.
+    """
+    if registry is None:
+        registry = _REGISTRY
+    return registry.build_meta_message(meta_type, data, delta)
+
+
 class MetaMessage(BaseMessage):
     is_meta = True
 
-    def __init__(self, type, **kwargs):
-        # TODO: handle unknown type?
-
-        spec = _META_SPEC_BY_TYPE[type]
+    def __init__(self, type, _spec=None, **kwargs):
+        # ``_spec`` binds the message to the registry view it was
+        # created or decoded from, so encode/decode/check stay
+        # consistent even if the registry is later mutated or the
+        # message moves to another session.
+        if _spec is None:
+            _spec = _REGISTRY._by_name[type]
         self_vars = vars(self)
         self_vars['type'] = type
+        self_vars['_spec'] = _spec
 
         for name in kwargs:
-            if name not in spec.settable_attributes:
+            if name not in _spec.settable_attributes:
                 raise ValueError(
                     '{} is not a valid argument for this message type'.format(
                         name))
 
-        for name, value in zip(spec.attributes, spec.defaults):
+        for name, value in zip(_spec.attributes, _spec.defaults):
             self_vars[name] = value
         self_vars['time'] = 0
 
@@ -514,13 +676,19 @@ class MetaMessage(BaseMessage):
             raise ValueError('copy must be same message type')
 
         attrs = vars(self).copy()
+        # The bound spec is passed explicitly and must not be treated
+        # as a message attribute. UnknownMetaMessage has no bound spec.
+        spec = attrs.pop('_spec', None)
         attrs.update(overrides)
-        return self.__class__(**attrs)
+        if spec is None:
+            # UnknownMetaMessage (and any spec-less subclass).
+            return self.__class__(**attrs)
+        return self.__class__(_spec=spec, **attrs)
 
     # FrozenMetaMessage overrides __setattr__() but we still need to
     # set attributes in __init__().
     def _setattr(self, name, value):
-        spec = _META_SPEC_BY_TYPE[self.type]
+        spec = vars(self)['_spec']
         self_vars = vars(self)
 
         if name in spec.settable_attributes:
@@ -539,13 +707,13 @@ class MetaMessage(BaseMessage):
     __setattr__ = _setattr
 
     def bytes(self):
-        spec = _META_SPEC_BY_TYPE[self.type]
+        spec = vars(self)['_spec']
         data = spec.encode(self)
 
         return ([0xff, spec.type_byte] + encode_variable_int(len(data)) + data)
 
     @classmethod
-    def from_bytes(cls, msg_bytes):
+    def from_bytes(cls, msg_bytes, registry=None):
         if msg_bytes[0] != 0xff:
             raise ValueError('bytes does not correspond to a MetaMessage.')
         scan_end = 2
@@ -560,13 +728,28 @@ class MetaMessage(BaseMessage):
                 flag = False
         if flag:
             raise ValueError('Bad data. Cannot be converted to message.')
-        msg = build_meta_message(msg_bytes[1], data)
-        return msg
+        return build_meta_message(msg_bytes[1], data, registry=registry)
 
     def _get_value_names(self):
         """Used by BaseMessage.__repr__()."""
-        spec = _META_SPEC_BY_TYPE[self.type]
+        spec = vars(self)['_spec']
         return spec.attributes + ['time']
+
+    def dict(self):
+        """Return a dictionary containing the public attributes."""
+        # The bound spec is an implementation detail and must not leak
+        # into the serialized form.
+        return {name: value for name, value in vars(self).items()
+                if name != '_spec'}
+
+    def __eq__(self, other):
+        if not isinstance(other, BaseMessage):
+            raise TypeError(f'can\'t compare message to {type(other)}')
+
+        # This includes time in comparison but ignores registry
+        # identity, so equal messages decoded through different
+        # registries still compare equal.
+        return self.dict() == other.dict()
 
 
 class UnknownMetaMessage(MetaMessage):

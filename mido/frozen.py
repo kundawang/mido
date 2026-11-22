@@ -19,7 +19,12 @@ class FrozenMessage(Frozen, Message):
 
 
 class FrozenMetaMessage(Frozen, MetaMessage):
-    pass
+    def __hash__(self):
+        # The bound _spec is registry state, not part of the message's
+        # public value, so it must not participate in hashing.
+        items = ((name, value) for name, value in vars(self).items()
+                 if name != '_spec')
+        return hash(tuple(sorted(items)))
 
 
 class FrozenUnknownMetaMessage(Frozen, UnknownMetaMessage):

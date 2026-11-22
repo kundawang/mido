@@ -25,7 +25,12 @@ import time
 from numbers import Integral
 
 from ..messages import SPEC_BY_STATUS, Message
-from .meta import MetaMessage, build_meta_message, encode_variable_int, meta_charset
+from .meta import (
+    MetaMessage,
+    build_meta_message,
+    encode_variable_int,
+    meta_charset,
+)
 from .tracks import MidiTrack, fix_end_of_track, merge_tracks
 from .units import tick2second
 
@@ -160,14 +165,14 @@ def read_variable_int(infile):
             return delta
 
 
-def read_meta_message(infile, delta):
+def read_meta_message(infile, delta, registry=None):
     meta_type = read_byte(infile)
     length = read_variable_int(infile)
     data = read_bytes(infile, length)
-    return build_meta_message(meta_type, data, delta)
+    return build_meta_message(meta_type, data, delta, registry=registry)
 
 
-def read_track(infile, debug=False, clip=False):
+def read_track(infile, debug=False, clip=False, registry=None):
     track = MidiTrack()
 
     name, size = read_chunk_header(infile)
@@ -209,7 +214,7 @@ def read_track(infile, debug=False, clip=False):
             peek_data = []
 
         if status_byte == 0xff:
-            msg = read_meta_message(infile, delta)
+            msg = read_meta_message(infile, delta, registry=registry)
         elif status_byte in [0xf0, 0xf7]:
             # TODO: I'm not quite clear on the difference between
             # f0 and f7 events.
@@ -294,7 +299,8 @@ class MidiFile:
                  charset='latin1',
                  debug=False,
                  clip=False,
-                 tracks=None
+                 tracks=None,
+                 meta_registry=None
                  ):
 
         self.filename = filename
@@ -303,6 +309,13 @@ class MidiFile:
         self.charset = charset
         self.debug = debug
         self.clip = clip
+        # The registry defines the spec view used when reading the
+        # file. Messages decoded from it stay bound to their specs, so
+        # saving the file later round-trips through the same view even
+        # if another plugin mutates another registry in the meantime.
+        # Defaults to the process-wide registry for backwards
+        # compatibility.
+        self.meta_registry = meta_registry
 
         self.tracks = []
         self._merged_track = None
@@ -370,7 +383,8 @@ class MidiFile:
 
                 self.tracks.append(read_track(infile,
                                               debug=self.debug,
-                                              clip=self.clip))
+                                              clip=self.clip,
+                                              registry=self.meta_registry))
                 # TODO: used to ignore EOFError. I hope things still work.
 
     @property

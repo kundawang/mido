@@ -312,6 +312,47 @@ and create messages in the usual way::
 and the new message type will now work when reading and writing MIDI
 files.
 
+Isolated registries
+~~~~~~~~~~~~~~~~~~~
+
+``add_meta_spec()`` registers the spec in a single process-wide
+registry. This is convenient, but when two libraries register
+different specs for the same meta type byte in the same process, the
+second registration changes how the first library decodes messages.
+
+To avoid this, create an isolated
+:class:`~mido.midifiles.meta.MetaSpecRegistry`. Each registry starts
+from a fresh copy of the built-in specs, and custom specs registered
+on one registry never affect another::
+
+    from mido.midifiles.meta import MetaSpecRegistry
+
+    # Two plugins with incompatible views of the same private byte.
+    plugin_a = MetaSpecRegistry.builtin()
+    plugin_a.add(MetaSpec_light_color)
+
+    plugin_b = MetaSpecRegistry.builtin()
+    plugin_b.add(MetaSpec_other_interpretation)
+
+A registry can be attached to a whole file parsing/writing session by
+passing it to :class:`~mido.MidiFile`, so every meta message in that
+file is decoded and encoded through the same consistent view::
+
+    mid = MidiFile('song.mid', meta_registry=plugin_a)
+
+Messages decoded through a registry stay bound to the spec they were
+created from, so they keep encoding correctly even if the registry is
+later modified, or if another plugin registers a conflicting spec.
+The legacy global functions (``add_meta_spec()``,
+``build_meta_message()`` and the default ``MetaMessage`` constructor)
+continue to use the process-wide registry unchanged.
+
+Registering the same class twice is a no-op; registering a different
+class that collides on a type name or type byte raises ``ValueError``
+and leaves the registry untouched. A registered spec can be removed
+again with ``registry.remove(SpecClass)`` (or the module-level
+``remove_meta_spec()`` for the global registry).
+
 Some additional functions are available::
 
     encode_string(unicode_string)
